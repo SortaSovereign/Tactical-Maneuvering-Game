@@ -1,15 +1,3 @@
-# Radar Repeater
-Run both halves:
-```bash
-npm run bootstrap
-npm run dev
-
-
----
-
-## 🧭 Step 3 – Devcontainer + workflow
-```bash
-cat > .devcontainer/devcontainer.json <<'EOF'
 {
   "name": "Radar Repeater",
   "image": "mcr.microsoft.com/devcontainers/javascript-node:20",
