@@ -121,7 +121,7 @@ class RadarScene extends Phaser.Scene {
     // default server URL
     if (!this.serverUrl.value) {
       const envDefault = (import.meta as any).env?.VITE_DEFAULT_SERVER_URL as string | undefined;
-      this.serverUrl.value = envDefault || "http://localhost:3001";
+      this.serverUrl.value = envDefault || "https://tactical-maneuvering-game.onrender.com";
     }
 
     const connectIfNeeded = () => {
