@@ -6,13 +6,12 @@
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root {
-      --bg:#021b0f; --panel:#0b2416; --text:#eaffea; --muted:#9bb9a2; --accent:#66ff99;
-      --border:#1f3d1f;
+      --bg:#0a2a16; --panel:#0e3a23; --text:#eaffea; --muted:#9bb9a2; --accent:#66ff99; --border:#1f3d1f;
     }
     html,body,#app { height:100%; margin:0; background:#020702; color:var(--text); font-family:ui-sans-serif,system-ui,Segoe UI,Roboto,Arial; }
     a { color: var(--accent); text-decoration: none; }
-    .row { display:flex; height:100%; }
     #app { position:relative; }
+
     /* Pre-join panel */
     #ui { position:absolute; inset:16px auto auto 16px; width:360px; background:var(--panel); border:1px solid var(--border);
           padding:12px; border-radius:10px; box-shadow:0 8px 24px rgba(0,0,0,.4); }
@@ -20,23 +19,53 @@
     .field { display:flex; gap:8px; align-items:center; margin:6px 0; }
     .field label { width:98px; font-size:12px; color:var(--muted); }
     .field input { flex:1; background:#06180f; border:1px solid var(--border); color:var(--text); padding:6px 8px; border-radius:6px; }
-    .btn { background:#0e3a23; border:1px solid var(--border); color:var(--text); padding:6px 10px; border-radius:6px; cursor:pointer; }
+    .btn { background:#134a2b; border:1px solid var(--border); color:var(--text); padding:6px 10px; border-radius:6px; cursor:pointer; }
     .btn:disabled { opacity:.6; cursor:default; }
     .muted { color:var(--muted); }
-    #rightPanel { position:absolute; top:12px; right:12px; width:360px; background:var(--panel); border:1px solid var(--border);
-                  padding:12px; border-radius:10px; display:none; max-height: calc(100% - 24px); overflow:auto; }
+
+    /* Right dock (two cards side-by-side) */
+    #rightDock {
+      position:absolute;
+      top:12px;
+      right:12px;
+      display:flex;
+      gap:12px;
+      max-height: calc(100% - 24px);
+      /* show staging card on the LEFT without changing DOM order */
+      flex-direction: row-reverse;
+      /* allow cards to overlay canvas; let cards themselves receive clicks */
+      pointer-events: none;
+    }
+    .card {
+      background:var(--panel);
+      border:1px solid var(--border);
+      padding:12px;
+      border-radius:10px;
+      overflow:auto;
+      display:none;
+      pointer-events: auto;
+    }
+    /* widths */
+    #mainCard { width:360px; }
+    #stagingCard { width:560px; } /* wider staging */
+
+    .tabs { display:flex; gap:6px; margin-bottom:8px; }
+    .tab { padding:6px 10px; border-radius:6px; border:1px solid var(--border); background:#0f2f1d; cursor:pointer; color:var(--muted); }
+    .tab.active { background:#134a2b; color:var(--text); }
+    .panel { display:none; }
+    .panel.active { display:block; }
+
     #contacts table, .tbl { width:100%; border-collapse:collapse; }
     #contacts th, #contacts td, .tbl th, .tbl td { border-bottom:1px solid var(--border); padding:4px 6px; font-size:12px; }
     .tiny { width:64px; } .mini { width:80px; }
     .linkish { color:var(--accent); cursor:pointer; }
+
     /* Session badge */
-    #sessionBadge { position:absolute; top:12px; left:12px; background:#0e3a23; border:1px solid var(--border); padding:6px 10px; border-radius:8px; display:none; }
+    #sessionBadge { position:absolute; top:12px; left:12px; background:#134a2b; border:1px solid var(--border); padding:6px 10px; border-radius:8px; display:none; }
+
     /* Waiting overlay (for non-owners before start) */
     #waitingOverlay { position:absolute; inset:0; display:none; align-items:center; justify-content:center; background:rgba(0,0,0,.35);
                       font-size:18px; font-weight:600; letter-spacing:.5px; }
-    /* Staging vs Live blocks inside rightPanel */
-    #stagingBlock { display:none; margin-top:8px; }
-    #npcLiveBlock { display:none; margin-top:12px; }
   </style>
 </head>
 <body>
@@ -56,46 +85,59 @@
   <div class="field"><label>Session ID</label><input id="sessionId" placeholder="ABCDE"/></div>
   <div class="field"><label>Callsign</label><input id="callsign" placeholder="DDG-80"/></div>
   <div class="field"><button id="joinBtn" class="btn">Join</button><div id="joinStatus" class="muted"></div></div>
-  <hr style="border:0;border-top:1px solid var(--border);margin:8px 0">
-  <h2>My Nav</h2>
-  <div class="field"><label>Course (°T)</label><input id="course" type="number" value="000"/></div>
-  <div class="field"><label>Speed (kt)</label><input id="speed" type="number" value="0"/></div>
-  <div class="field"><button id="setNavBtn" class="btn">Set Course/Speed</button></div>
 </div>
 
-<!-- In-session panel -->
-<div id="rightPanel">
-  <div id="guideControls">
-    <h2>Guide Controls</h2>
-    <div class="field"><label>Range (yds)</label><input id="guideRange" type="number" value="40000"/><button id="guideRangeBtn" class="btn">Set</button></div>
-    <div class="field"><button id="guidePauseBtn" class="btn">Pause</button><span id="guideStatus" class="muted"></span></div>
-
-    <!-- STAGING (shows only for owner before start) -->
-    <div id="stagingBlock">
-      <h3>Staging – Players</h3>
-      <div id="stagingPlayers"></div>
-
-      <h3 style="margin-top:10px">Staging – NPCs</h3>
-      <div id="stagingNpcs"></div>
-      <div class="field"><button id="addNpcRow" class="btn">Add NPC Row</button></div>
-
-      <div style="margin-top:8px"><button id="startBtn" class="btn">Start Scenario</button></div>
+<!-- Right dock with two cards -->
+<div id="rightDock">
+  <!-- Main card: tabs -->
+  <div id="mainCard" class="card">
+    <div class="tabs">
+      <div id="tabNav" class="tab active">My Nav</div>
+      <div id="tabContacts" class="tab">Contacts</div>
     </div>
 
-    <!-- LIVE (shows only after start) -->
-    <div id="npcLiveBlock">
-      <h3>NPC Control (Live)</h3>
-      <div id="npcLiveList"></div>
+    <div id="tabNavPanel" class="panel active">
+      <div class="field"><label>Course (°T)</label><input id="course" type="number" value="000"/></div>
+      <div class="field"><label>Speed (kt)</label><input id="speed" type="number" value="0"/></div>
+      <div class="field"><button id="setNavBtn" class="btn">Set Course/Speed</button></div>
+
+      <hr style="border:0;border-top:1px solid var(--border);margin:8px 0">
+
+      <div id="guideControls" style="display:none">
+        <h3>Guide Controls</h3>
+        <div class="field"><label>Range (yds)</label><input id="guideRange" type="number" value="40000"/><button id="guideRangeBtn" class="btn">Set</button></div>
+        <div class="field"><button id="guidePauseBtn" class="btn">Pause</button><span id="guideStatus" class="muted"></span></div>
+
+        <!-- Live after start -->
+        <div id="npcLiveBlock" style="margin-top:12px; display:none">
+          <h4>NPC Control (Live)</h4>
+          <div id="npcLiveList"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="tabContactsPanel" class="panel">
+      <div id="contacts"></div>
     </div>
   </div>
 
-  <h2 style="margin-top:16px">Contacts</h2>
-  <div id="contacts"></div>
+  <!-- Staging card (separate, shows only owner before start) -->
+  <div id="stagingCard" class="card">
+    <h2>Staging</h2>
+    <div class="muted" style="margin-bottom:8px">Arrange starting formation. Values persist until you click “Apply Staging”.</div>
 
-  <h2 style="margin-top:16px">Recording</h2>
-  <div class="field">
-    <button id="recToggleBtn" class="btn">Start Recording</button>
-    <a id="recDownload" style="display:none" download>Download CSV</a>
+    <h3>Players</h3>
+    <div id="stagingPlayers"></div>
+
+    <h3 style="margin-top:10px">NPCs</h3>
+    <div id="stagingNpcs"></div>
+    <div class="field"><button id="addNpcRow" class="btn">Add NPC Row</button></div>
+
+    <div class="field" style="margin-top:8px; gap:8px">
+      <button id="applyStagingBtn" class="btn">Apply Staging</button>
+      <button id="startBtn" class="btn">Start Scenario</button>
+      <span id="applyStatus" class="muted"></span>
+    </div>
   </div>
 </div>
 

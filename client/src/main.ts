@@ -20,14 +20,11 @@ function rangeY(a:{x:number,y:number}, b:{x:number,y:number}) { return Math.hypo
 function bearingRelative(bt:number, myC:number){ return (bt - myC + 360) % 360; }
 function angDiff(a:number,b:number){ let d=(a-b+540)%360-180; return d; }
 function setText(el: HTMLElement, val: unknown) { el.textContent = String(val ?? ""); }
-function show(el: HTMLElement | null, on: boolean, display: string = "block") {
-  if (!el) return;
-  el.style.display = on ? display : "none";
-}
-function byId<T extends HTMLElement = HTMLElement>(id: string) {
-  return document.getElementById(id) as T | null;
-}
 function normalizeCallsign(v: string) { return (v || "").toUpperCase().replace(/[^A-Z0-9\-]/g, "").slice(0, 12); }
+function show(el: HTMLElement | null, on: boolean, display: string = "block") { if (el) el.style.display = on ? display : "none"; }
+function byId<T extends HTMLElement = HTMLElement>(id: string) { return document.getElementById(id) as T | null; }
+function pad3(n:number){ return String(Math.round(n)%360).padStart(3,"0"); }
+function cryptoRand(){ return Math.random().toString(36).slice(2,9); }
 
 let socket: Socket | null = null;
 let lastSnapshot: SnapshotMsg | null = null;
@@ -36,8 +33,28 @@ let pendingJoin = false;
 
 const labelById = new Map<string, Phaser.GameObjects.Text>();
 
+// --- Persistent staging buffers (players & NPCs) ---
+type StagedPlayer = { bearingDeg: number; distanceYds: number; courseDeg: number; speedKts: number };
+const stagedPlayers = new Map<string, StagedPlayer>(); // key = player.id (excluding owner)
 type StNpcRow = { id: string; callsign: string; bearingDeg: number; distanceYds: number; courseDeg: number; speedKts: number };
 const uiNpcRows: StNpcRow[] = [];
+
+// Track last known player IDs for minimal churn
+let lastPlayerIdsKey = "";
+
+// Render guard: only re-render staging when needed
+let needsStagingRender = true;
+function isEditingStaging(scene: RadarScene) {
+  const a = document.activeElement as HTMLElement | null;
+  if (!a) return false;
+  const inPlayers = !!scene.stagingPlayers && scene.stagingPlayers.contains(a);
+  const inNpcs    = !!scene.stagingNpcs    && scene.stagingNpcs.contains(a);
+  return (a.tagName === "INPUT") && (inPlayers || inNpcs);
+}
+
+// --- Prevent guide “jump”: queue My Nav during staging and flush on Start
+let prevStarted: boolean | null = null;
+let pendingNav: { courseDeg?: number; speedKts?: number } | null = null;
 
 class RadarScene extends Phaser.Scene {
   cx = 0; cy = 0; r = 0;
@@ -46,10 +63,18 @@ class RadarScene extends Phaser.Scene {
   contactsG!: Phaser.GameObjects.Graphics;
   sweepG!: Phaser.GameObjects.Graphics;
 
+  // Tabs
+  tabNavBtn!: HTMLElement; tabContactsBtn!: HTMLElement;
+  tabNavPanel!: HTMLElement; tabContactsPanel!: HTMLElement;
+
+  // Cards
+  mainCard!: HTMLElement;
+  stagingCard!: HTMLElement;
+
   // UI
   contactsDiv!: HTMLElement;
   uiRoot!: HTMLElement;
-  rightPanel!: HTMLElement;
+  rightDock!: HTMLElement;
   waitingOverlay!: HTMLElement;
   sessionBadge!: HTMLElement; badgeSessionId!: HTMLElement;
 
@@ -61,16 +86,12 @@ class RadarScene extends Phaser.Scene {
   stagingPlayers!: HTMLElement;
   stagingNpcs!: HTMLElement;
   addNpcRow!: HTMLElement;
+  applyStagingBtn!: HTMLButtonElement; applyStatus!: HTMLElement;
   startBtn!: HTMLButtonElement;
-  stagingBlock!: HTMLElement;
-  npcLiveBlock!: HTMLElement;
 
   // Live NPC controls
+  npcLiveBlock!: HTMLElement;
   npcLiveList!: HTMLElement;
-
-  // Recorder
-  recToggleBtn!: HTMLButtonElement; recDownload!: HTMLAnchorElement;
-  recordingOn = false;
 
   // Pre-join & nav
   serverUrl!: HTMLInputElement; sessName!: HTMLInputElement; sessRange!: HTMLInputElement;
@@ -83,16 +104,13 @@ class RadarScene extends Phaser.Scene {
   sweepDeg = 0; cadenceAvgMs = 2500; lastServerTickMs = 0;
 
   create() {
-    this.cameras.main.setBackgroundColor(0x020702);
+    this.cameras.main.setBackgroundColor(0x0a2a16);
     this.cacheUi();
 
     // default server URL
     if (!this.serverUrl.value) {
-      const auto =
-        (location.hostname.includes("githubpreview.dev") || location.hostname.includes("codespaces"))
-          ? location.origin.replace(/5173/, "3001")
-          : "http://localhost:3001";
-      this.serverUrl.value = auto;
+      const envDefault = (import.meta as any).env?.VITE_DEFAULT_SERVER_URL as string | undefined;
+      this.serverUrl.value = envDefault || "http://localhost:3001";
     }
 
     const connectIfNeeded = () => {
@@ -101,9 +119,7 @@ class RadarScene extends Phaser.Scene {
 
       socket.on("connect", () => {
         setText(this.joinStatus, `Connected: ${socket!.id}`);
-        myId = socket!.id;
         this.tryClaimOwner();
-        // no auto-join here to avoid stale sessions
       });
       socket.on("disconnect", (reason) => setText(this.joinStatus, `Disconnected: ${String(reason)}`));
       socket.on("connect_error", (err) => setText(this.joinStatus, `connect_error: ${("message" in (err as any)) ? (err as any).message : String(err)}`));
@@ -116,24 +132,60 @@ class RadarScene extends Phaser.Scene {
         this.lastServerTickMs = snap.serverTimeMs;
         lastSnapshot = snap;
 
+        // Flush queued nav once scenario starts
+        const startedNow = snap.session.started === true;
+        if (prevStarted === false && startedNow && pendingNav && socket) {
+          socket.emit("player:setNav", pendingNav);
+          pendingNav = null;
+        }
+        prevStarted = startedNow;
+
+        // show main card after join
+        show(this.mainCard, true, "block");
+
         this.updateGuideUi();
         this.updateSessionBadge();
         this.updateWaitingOverlay();
-        this.renderStagingPlayers();
-        this.renderStagingNpcs();
+
+        // Only seed when membership changed
+        const changed = this.seedStagedPlayersFromSnapshot();
+        if (changed) needsStagingRender = true;
+
+        // Render staging only if flagged and not typing
+        if (needsStagingRender && !isEditingStaging(this)) {
+          this.renderStagingPlayers();
+          this.renderStagingNpcs();
+          needsStagingRender = false;
+        }
+
+        // Live NPC list can always refresh
         this.renderNpcLiveControls();
+
         this.drawContacts();
         this.renderContactsPanel();
       });
 
       socket.on("player:left", () => {
-        if (lastSnapshot) { this.renderStagingPlayers(); this.drawContacts(); this.renderContactsPanel(); }
+        if (lastSnapshot) {
+          const changed = this.seedStagedPlayersFromSnapshot();
+          if (changed) needsStagingRender = true;
+          if (needsStagingRender && !isEditingStaging(this)) {
+            this.renderStagingPlayers();
+            needsStagingRender = false;
+          }
+          this.drawContacts();
+          this.renderContactsPanel();
+        }
       });
 
       socket.on("scenario:update", (_data: ScenarioUpdate) => {
         this.renderNpcLiveControls();
       });
     };
+
+    // Tabs
+    this.tabNavBtn.addEventListener("click", () => this.setTab(true));
+    this.tabContactsBtn.addEventListener("click", () => this.setTab(false));
 
     // Create
     this.createBtn.addEventListener("click", () => {
@@ -148,18 +200,15 @@ class RadarScene extends Phaser.Scene {
             this.sessionIdInput.value = sid;
             setText(this.createStatus, `Created session: ${sid}`);
 
-            // Clear old saved session
             localStorage.removeItem("rr_sessionId");
             localStorage.removeItem("rr_callsign");
 
-            // Auto-join
             const csInput = (this.callsignInput.value || "GUIDE").trim() || "GUIDE";
             const cs = normalizeCallsign(csInput);
             this.joinBtn.disabled = true;
             this.joinSession(sid, cs);
             setTimeout(() => { this.joinBtn.disabled = false; }, 1500);
 
-            // Save fresh values
             localStorage.setItem("rr_sessionId", sid);
             localStorage.setItem("rr_callsign", cs);
           } else {
@@ -168,7 +217,7 @@ class RadarScene extends Phaser.Scene {
         });
     });
 
-    // Join (manual)
+    // Join
     this.joinBtn.addEventListener("click", () => {
       connectIfNeeded();
       const sessionId = this.sessionIdInput.value.trim();
@@ -178,11 +227,27 @@ class RadarScene extends Phaser.Scene {
       this.joinSession(sessionId, cs);
     });
 
-    // My Nav
+    // My Nav — queue during staging; live-apply after start
     this.setNavBtn.addEventListener("click", () => {
-      if (!socket) return;
-      const c = Number(this.course.value), s = Number(this.speed.value);
-      socket.emit("player:setNav", { courseDeg: isFinite(c) ? c : undefined, speedKts: isFinite(s) ? s : undefined });
+      const c = Number(this.course.value);
+      const s = Number(this.speed.value);
+      if (!lastSnapshot) return;
+
+      if (!lastSnapshot.session.started) {
+        pendingNav = {
+          courseDeg: isFinite(c) ? c : undefined,
+          speedKts:  isFinite(s) ? s : undefined
+        };
+        setText(this.guideStatus, "Nav queued — will apply on Start.");
+        return;
+      }
+
+      if (socket) {
+        socket.emit("player:setNav", {
+          courseDeg: isFinite(c) ? c : undefined,
+          speedKts:  isFinite(s) ? s : undefined
+        });
+      }
     });
 
     // Guide: range/pause
@@ -190,7 +255,6 @@ class RadarScene extends Phaser.Scene {
       if (!socket || !lastSnapshot) return;
       const sid = lastSnapshot.session.id;
       const nextRange = Number(this.guideRange.value) || lastSnapshot.session.rangeYds;
-
       socket.emit("session:setRange", { sessionId: sid, rangeYds: nextRange }, (resp: any) => {
         if (!resp?.ok) setText(this.guideStatus, `Range set failed: ${String(resp?.error ?? "")}`);
       });
@@ -199,48 +263,55 @@ class RadarScene extends Phaser.Scene {
       if (!socket || !lastSnapshot) return;
       const sid = lastSnapshot.session.id;
       const next = !lastSnapshot.session.paused;
-
       socket.emit("session:pause", { sessionId: sid, paused: next }, (resp: any) => {
         if (!resp?.ok) setText(this.guideStatus, `Pause failed: ${String(resp?.error ?? "")}`);
       });
     });
 
-    // Staging: add/remove NPC rows and START
+    // Staging: add row, apply, start
     this.addNpcRow.addEventListener("click", () => {
       uiNpcRows.push({ id: cryptoRand(), callsign: "SKUNK", bearingDeg: 0, distanceYds: 0, courseDeg: 90, speedKts: 15 });
-      this.renderStagingNpcs();
+      needsStagingRender = true;
+      if (!isEditingStaging(this)) { this.renderStagingNpcs(); needsStagingRender = false; }
+    });
+
+    this.applyStagingBtn.addEventListener("click", () => {
+      this.clearDirtyFlags(this.stagingPlayers);
+      this.clearDirtyFlags(this.stagingNpcs);
+      needsStagingRender = true;
+      if (!isEditingStaging(this)) { this.renderStagingPlayers(); this.renderStagingNpcs(); needsStagingRender = false; }
+      setText(this.applyStatus, "Staging saved.");
+      setTimeout(() => setText(this.applyStatus, ""), 1200);
     });
 
     this.startBtn.addEventListener("click", () => {
       if (!socket || !lastSnapshot) return;
       const sid = lastSnapshot.session.id;
 
-      // players (exclude owner)
-      const tbody = this.stagingPlayers.querySelector("tbody");
+      // Build placements from buffered stagedPlayers (exclude owner)
       const placements: Array<{playerId:string; bearingDeg:number; distanceYds:number; courseDeg?:number; speedKts?:number}> = [];
-      if (tbody) {
-        for (const tr of Array.from(tbody.querySelectorAll("tr"))) {
-          const pid = (tr.getAttribute("data-id") || "").trim(); if (!pid) continue;
-          const b = Number((tr.querySelector<HTMLInputElement>(".st_b"))?.value ?? 0);
-          const d = Number((tr.querySelector<HTMLInputElement>(".st_d"))?.value ?? 0);
-          const c = Number((tr.querySelector<HTMLInputElement>(".st_c"))?.value ?? 0);
-          const s = Number((tr.querySelector<HTMLInputElement>(".st_s"))?.value ?? 0);
-          placements.push({ playerId: pid, bearingDeg: b, distanceYds: d, courseDeg: c, speedKts: s });
-        }
+      const ownerId = lastSnapshot.session.ownerId;
+      for (const p of lastSnapshot.players) {
+        if (p.id === ownerId || p.role === "npc") continue;
+        const st = stagedPlayers.get(p.id);
+        if (!st) continue;
+        placements.push({
+          playerId: p.id,
+          bearingDeg: st.bearingDeg,
+          distanceYds: st.distanceYds,
+          courseDeg: st.courseDeg,
+          speedKts: st.speedKts
+        });
       }
 
-      // npcs (from UI rows)
-      const npcs: Array<{callsign:string; bearingDeg:number; distanceYds:number; courseDeg:number; speedKts:number}> = [];
-      for (const row of uiNpcRows) {
-        const host = this.stagingNpcs.querySelector(`tr[data-id="${row.id}"]`);
-        if (!host) continue;
-        const cs = String((host.querySelector<HTMLInputElement>(".npc_cs"))?.value ?? "SKUNK");
-        const b  = Number((host.querySelector<HTMLInputElement>(".npc_b"))?.value ?? 0);
-        const d  = Number((host.querySelector<HTMLInputElement>(".npc_d"))?.value ?? 0);
-        const c  = Number((host.querySelector<HTMLInputElement>(".npc_c"))?.value ?? 0);
-        const s  = Number((host.querySelector<HTMLInputElement>(".npc_s"))?.value ?? 0);
-        npcs.push({ callsign: cs, bearingDeg: b, distanceYds: d, courseDeg: c, speedKts: s });
-      }
+      // NPCs from buffer
+      const npcs = uiNpcRows.map(n => ({
+        callsign: n.callsign,
+        bearingDeg: n.bearingDeg,
+        distanceYds: n.distanceYds,
+        courseDeg: n.courseDeg,
+        speedKts: n.speedKts
+      }));
 
       socket.emit("session:start", { sessionId: sid, placements, npcs }, (resp: any) => {
         if (!resp?.ok) setText(this.guideStatus, `Start failed: ${String(resp?.error ?? "")}`);
@@ -257,43 +328,56 @@ class RadarScene extends Phaser.Scene {
   }
 
   cacheUi() {
-    this.uiRoot = document.getElementById("ui")!;
-    this.rightPanel = document.getElementById("rightPanel")!;
-    this.contactsDiv = document.getElementById("contacts")!;
-    this.waitingOverlay = document.getElementById("waitingOverlay")!;
-    this.sessionBadge = document.getElementById("sessionBadge")!;
-    this.badgeSessionId = document.getElementById("badgeSessionId")!;
+    this.uiRoot = byId("ui")!;
+    this.rightDock = byId("rightDock")!;
+    this.mainCard = byId("mainCard")!;
+    this.stagingCard = byId("stagingCard")!;
 
-    this.serverUrl = document.getElementById("serverUrl") as HTMLInputElement;
-    this.sessName  = document.getElementById("sessName") as HTMLInputElement;
-    this.sessRange = document.getElementById("sessRange") as HTMLInputElement;
-    this.createBtn = document.getElementById("createBtn") as HTMLButtonElement;
-    this.createStatus = document.getElementById("createStatus")!;
-    this.sessionIdInput = document.getElementById("sessionId") as HTMLInputElement;
-    this.callsignInput  = document.getElementById("callsign") as HTMLInputElement;
-    this.joinBtn = document.getElementById("joinBtn") as HTMLButtonElement;
-    this.joinStatus = document.getElementById("joinStatus")!;
+    this.contactsDiv = byId("contacts")!;
+    this.waitingOverlay = byId("waitingOverlay")!;
+    this.sessionBadge = byId("sessionBadge")!;
+    this.badgeSessionId = byId("badgeSessionId")!;
 
-    this.course = document.getElementById("course") as HTMLInputElement;
-    this.speed  = document.getElementById("speed") as HTMLInputElement;
-    this.setNavBtn = document.getElementById("setNavBtn") as HTMLButtonElement;
+    // Tabs
+    this.tabNavBtn = byId("tabNav")!;
+    this.tabContactsBtn = byId("tabContacts")!;
+    this.tabNavPanel = byId("tabNavPanel")!;
+    this.tabContactsPanel = byId("tabContactsPanel")!;
 
-    this.guidePanel = document.getElementById("guideControls")!;
-    this.guideRange = document.getElementById("guideRange") as HTMLInputElement;
-    this.guideRangeBtn = document.getElementById("guideRangeBtn") as HTMLButtonElement;
-    this.guidePauseBtn = document.getElementById("guidePauseBtn") as HTMLButtonElement;
-    this.guideStatus = document.getElementById("guideStatus")!;
+    // Connect/Create/Join
+    this.serverUrl = byId<HTMLInputElement>("serverUrl")!;
+    this.sessName  = byId<HTMLInputElement>("sessName")!;
+    this.sessRange = byId<HTMLInputElement>("sessRange")!;
+    this.createBtn = byId<HTMLButtonElement>("createBtn")!;
+    this.createStatus = byId("createStatus")!;
+    this.sessionIdInput = byId<HTMLInputElement>("sessionId")!;
+    this.callsignInput  = byId<HTMLInputElement>("callsign")!;
+    this.joinBtn = byId<HTMLButtonElement>("joinBtn")!;
+    this.joinStatus = byId("joinStatus")!;
 
-    this.stagingPlayers = document.getElementById("stagingPlayers")!;
-    this.stagingNpcs = document.getElementById("stagingNpcs")!;
-    this.addNpcRow = document.getElementById("addNpcRow")!;
-    this.startBtn = document.getElementById("startBtn") as HTMLButtonElement;
-    this.stagingBlock = byId("stagingBlock")!;
+    // My Nav
+    this.course = byId<HTMLInputElement>("course")!;
+    this.speed  = byId<HTMLInputElement>("speed")!;
+    this.setNavBtn = byId<HTMLButtonElement>("setNavBtn")!;
+
+    // Guide
+    this.guidePanel = byId("guideControls")!;
+    this.guideRange = byId<HTMLInputElement>("guideRange")!;
+    this.guideRangeBtn = byId<HTMLButtonElement>("guideRangeBtn")!;
+    this.guidePauseBtn = byId<HTMLButtonElement>("guidePauseBtn")!;
+    this.guideStatus = byId("guideStatus")!;
+
+    // Staging
+    this.stagingPlayers = byId("stagingPlayers")!;
+    this.stagingNpcs = byId("stagingNpcs")!;
+    this.addNpcRow = byId("addNpcRow")!;
+    this.applyStagingBtn = byId<HTMLButtonElement>("applyStagingBtn")!;
+    this.applyStatus = byId("applyStatus")!;
+    this.startBtn = byId<HTMLButtonElement>("startBtn")!;
+
+    // Live NPC control
     this.npcLiveBlock = byId("npcLiveBlock")!;
-    this.npcLiveList = document.getElementById("npcLiveList")!;
-
-    this.recToggleBtn = document.getElementById("recToggleBtn") as HTMLButtonElement;
-    this.recDownload = document.getElementById("recDownload") as HTMLAnchorElement;
+    this.npcLiveList = byId("npcLiveList")!;
   }
 
   tryClaimOwner() {
@@ -303,7 +387,22 @@ class RadarScene extends Phaser.Scene {
     socket.emit("session:claimOwner", { sessionId: sid, ownerToken: token }, () => {});
   }
 
-  // Join (robust + UI flip)
+  // Tabs
+  setTab(navActive: boolean) {
+    if (navActive) {
+      this.tabNavBtn.classList.add("active");
+      this.tabContactsBtn.classList.remove("active");
+      show(this.tabNavPanel, true);
+      show(this.tabContactsPanel, false);
+    } else {
+      this.tabContactsBtn.classList.add("active");
+      this.tabNavBtn.classList.remove("active");
+      show(this.tabContactsPanel, true);
+      show(this.tabNavPanel, false);
+    }
+  }
+
+  // Join
   joinSession(sessionId: string, callsign: string) {
     if (!socket || pendingJoin) return;
     const cs = normalizeCallsign(callsign);
@@ -314,30 +413,35 @@ class RadarScene extends Phaser.Scene {
       pendingJoin = false;
 
       if (resp?.ok) {
-        // Apply snapshot right away
         lastSnapshot = resp.snapshot as SnapshotMsg;
+        myId = String(resp.myPlayerId || "")
+        // bring up the dock/cards
+        show(this.mainCard, true, "block");
 
-        // Force panel swap (inline style to avoid CSS specificity issues)
+        // hide pre-join
         if (this.uiRoot) this.uiRoot.style.display = "none";
-        if (this.rightPanel) this.rightPanel.style.display = "block";
 
-        // Sync UI
         this.sessRange.value = String(lastSnapshot.session.rangeYds);
         this.updateGuideUi();
         this.updateSessionBadge();
         this.updateWaitingOverlay();
-        this.renderStagingPlayers();
-        this.renderStagingNpcs();
+
+        // seed buffers for staging
+        this.seedStagedPlayersFromSnapshot();
+        needsStagingRender = true; // first render
+        if (!isEditingStaging(this)) { this.renderStagingPlayers(); this.renderStagingNpcs(); needsStagingRender = false; }
         this.renderNpcLiveControls();
+
+        // initialize started state tracking
+        prevStarted = lastSnapshot.session.started;
+
         this.drawContacts();
         this.renderContactsPanel();
 
-        // Status + persistence
         setText(this.joinStatus, `Joined ${sessionId} as ${safeCs}`);
         localStorage.setItem("rr_sessionId", sessionId);
         localStorage.setItem("rr_callsign", safeCs);
 
-        // Try to claim owner (if this tab holds the token)
         this.tryClaimOwner();
       } else if (resp?.error === "CALLSIGN_TAKEN") {
         const alt = `${safeCs}-${Math.random().toString(36).slice(2,4).toUpperCase()}`;
@@ -349,7 +453,7 @@ class RadarScene extends Phaser.Scene {
     });
   }
 
-  // === UI updates ===
+  // === UI gating ===
   updateSessionBadge() {
     if (!lastSnapshot || !myId) { this.sessionBadge.style.display = "none"; return; }
     const isOwner = lastSnapshot.session.ownerId === myId;
@@ -358,57 +462,86 @@ class RadarScene extends Phaser.Scene {
   }
 
   updateGuideUi() {
-  if (!lastSnapshot || !myId) return;
+    if (!lastSnapshot || !myId) return;
 
-  const isOwner = lastSnapshot.session.ownerId === myId;
-  // Guide controls visible only to owner
-  show(this.guidePanel, isOwner);
+    const isOwner = lastSnapshot.session.ownerId === myId;
+    // show main card always after join
+    show(this.mainCard, true, "block");
 
-  // Keep range input synced unless focused
-  if (document.activeElement !== this.guideRange) {
-    this.guideRange.value = String(lastSnapshot.session.rangeYds);
+    // Guide panel only for owner
+    show(this.guidePanel, isOwner);
+
+    if (document.activeElement !== this.guideRange) {
+      this.guideRange.value = String(lastSnapshot.session.rangeYds);
+    }
+    setText(this.guideStatus, `${lastSnapshot.session.started ? "Armed" : "Staging"} • ${lastSnapshot.session.paused ? "Paused" : "Running"}`);
+    this.guidePauseBtn.textContent = lastSnapshot.session.paused ? "Resume" : "Pause";
+
+    // Staging card: owner before start; hide after start
+    show(this.stagingCard, isOwner && !lastSnapshot.session.started, "block");
+    // Live NPC block visible only after start (and owner)
+    show(this.npcLiveBlock, isOwner && lastSnapshot.session.started);
   }
-
-  // Status line + pause button
-  setText(this.guideStatus, `${lastSnapshot.session.started ? "Armed" : "Staging"} • ${lastSnapshot.session.paused ? "Paused" : "Running"}`);
-  this.guidePauseBtn.textContent = lastSnapshot.session.paused ? "Resume" : "Pause";
-
-  // ★ Explicitly toggle staging vs live blocks
-  const showStaging = isOwner && !lastSnapshot.session.started;
-  const showLive    = isOwner && lastSnapshot.session.started;
-
-  show(this.stagingBlock, showStaging);
-  show(this.npcLiveBlock, showLive);
-
-  // Non-owner waiting overlay handled elsewhere; ensure owner never sees it
-  if (isOwner && this.waitingOverlay) this.waitingOverlay.style.display = "none";
-}
-
 
   updateWaitingOverlay() {
     if (!lastSnapshot || !myId) { this.waitingOverlay.style.display = "none"; return; }
     const isOwner = lastSnapshot.session.ownerId === myId;
-    const show = !lastSnapshot.session.started && !isOwner;
-    this.waitingOverlay.style.display = show ? "flex" : "none";
+    const showIt = !lastSnapshot.session.started && !isOwner;
+    this.waitingOverlay.style.display = showIt ? "flex" : "none";
   }
 
-  // Staging players (exclude owner)
-  renderStagingPlayers() {
-    if (!lastSnapshot || !myId) { this.stagingPlayers.innerHTML = ""; return; }
-    const isOwner = lastSnapshot.session.ownerId === myId;
-    if (!isOwner || lastSnapshot.session.started) { this.stagingPlayers.innerHTML = ""; return; }
+  // === Staging buffers & rendering ===
+  seedStagedPlayersFromSnapshot(): boolean {
+    if (!lastSnapshot) return false;
 
-    const rows = lastSnapshot.players
+    const ids = lastSnapshot.players
       .filter(p => p.role !== "npc" && p.id !== lastSnapshot.session.ownerId)
-      .map(p => `
+      .map(p => p.id)
+      .sort();
+    const key = ids.join(",");
+
+    if (key === lastPlayerIdsKey) return false; // no change
+    lastPlayerIdsKey = key;
+
+    // Add new players
+    for (const p of lastSnapshot.players) {
+      if (p.role === "npc" || p.id === lastSnapshot.session.ownerId) continue;
+      if (!stagedPlayers.has(p.id)) {
+        stagedPlayers.set(p.id, {
+          bearingDeg: 0,
+          distanceYds: 0,
+          courseDeg: Math.round(p.courseDeg) || 0,
+          speedKts: Math.round(p.speedKts) || 0
+        });
+      }
+    }
+
+    // Remove players who left
+    for (const existingId of Array.from(stagedPlayers.keys())) {
+      if (!ids.includes(existingId)) stagedPlayers.delete(existingId);
+    }
+
+    return true; // membership changed
+  }
+
+  renderStagingPlayers() {
+    if (!lastSnapshot) { this.stagingPlayers.innerHTML = ""; return; }
+
+    const ownerId = lastSnapshot.session.ownerId;
+    const players = lastSnapshot.players.filter(p => p.role !== "npc" && p.id !== ownerId);
+
+    const rows = players.map(p => {
+      const st = stagedPlayers.get(p.id)!;
+      return `
         <tr data-id="${p.id}">
-          <td>${p.callsign}</td>
-          <td><input class="st_b tiny" value="000"/></td>
-          <td><input class="st_d mini" value="0"/></td>
-          <td><input class="st_c tiny" value="${p.courseDeg.toFixed(0)}"/></td>
-          <td><input class="st_s tiny" value="${p.speedKts.toFixed(0)}"/></td>
+          <td style="text-align:left">${p.callsign}</td>
+          <td><input class="st_b tiny" value="${pad3(st.bearingDeg)}"/></td>
+          <td><input class="st_d mini" value="${st.distanceYds}"/></td>
+          <td><input class="st_c tiny" value="${st.courseDeg}"/></td>
+          <td><input class="st_s tiny" value="${st.speedKts}"/></td>
         </tr>
-      `).join("");
+      `;
+    }).join("");
 
     this.stagingPlayers.innerHTML = `
       <table class="tbl">
@@ -416,14 +549,25 @@ class RadarScene extends Phaser.Scene {
         <tbody>${rows || '<tr><td colspan="5" class="muted">No other players yet…</td></tr>'}</tbody>
       </table>
     `;
+
+    // Wire inputs to update buffers immediately (persist even if you click elsewhere)
+    for (const tr of Array.from(this.stagingPlayers.querySelectorAll("tr[data-id]"))) {
+      const pid = (tr as HTMLElement).getAttribute("data-id")!;
+      const st = stagedPlayers.get(pid)!;
+
+      const ib = tr.querySelector<HTMLInputElement>(".st_b")!;
+      const id = tr.querySelector<HTMLInputElement>(".st_d")!;
+      const ic = tr.querySelector<HTMLInputElement>(".st_c")!;
+      const is = tr.querySelector<HTMLInputElement>(".st_s")!;
+
+      ib.addEventListener("input", () => { st.bearingDeg = (Number(ib.value) || 0) % 360; });
+      id.addEventListener("input", () => { st.distanceYds = Number(id.value) || 0; });
+      ic.addEventListener("input", () => { st.courseDeg   = Number(ic.value) || 0; });
+      is.addEventListener("input", () => { st.speedKts    = Number(is.value) || 0; });
+    }
   }
 
-  // Staging NPCs dynamic rows
   renderStagingNpcs() {
-    if (!lastSnapshot || !myId) { this.stagingNpcs.innerHTML = ""; return; }
-    const isOwner = lastSnapshot.session.ownerId === myId;
-    if (!isOwner || lastSnapshot.session.started) { this.stagingNpcs.innerHTML = ""; return; }
-
     const rows = uiNpcRows.map(r => `
       <tr data-id="${r.id}">
         <td><input class="npc_cs" value="${r.callsign}"/></td>
@@ -442,28 +586,58 @@ class RadarScene extends Phaser.Scene {
       </table>
     `;
 
-    for (const el of Array.from(this.stagingNpcs.querySelectorAll(".npc_del"))) {
-      el.addEventListener("click", () => {
-        const id = (el as HTMLElement).getAttribute("data-id")!;
-        const idx = uiNpcRows.findIndex(rr => rr.id === id);
-        if (idx >= 0) { uiNpcRows.splice(idx,1); this.renderStagingNpcs(); }
+    // Wire inputs to buffer
+    for (const tr of Array.from(this.stagingNpcs.querySelectorAll("tr[data-id]"))) {
+      const idAttr = (tr as HTMLElement).getAttribute("data-id")!;
+      const row = uiNpcRows.find(r => r.id === idAttr)!;
+
+      const ics = tr.querySelector<HTMLInputElement>(".npc_cs")!;
+      const ib  = tr.querySelector<HTMLInputElement>(".npc_b")!;
+      const id  = tr.querySelector<HTMLInputElement>(".npc_d")!;
+      const ic  = tr.querySelector<HTMLInputElement>(".npc_c")!;
+      const is  = tr.querySelector<HTMLInputElement>(".npc_s")!;
+
+      ics.addEventListener("input", () => { row.callsign    = ics.value.toUpperCase(); });
+      ib.addEventListener("input",  () => { row.bearingDeg  = (Number(ib.value) || 0) % 360; });
+      id.addEventListener("input",  () => { row.distanceYds = Number(id.value) || 0; });
+      ic.addEventListener("input",  () => { row.courseDeg   = Number(ic.value) || 0; });
+      is.addEventListener("input",  () => { row.speedKts    = Number(is.value) || 0; });
+
+      const del = tr.querySelector(".npc_del") as HTMLElement;
+      del.addEventListener("click", () => {
+        const idx = uiNpcRows.findIndex(r => r.id === idAttr);
+        if (idx >= 0) {
+          uiNpcRows.splice(idx, 1);
+          needsStagingRender = true;
+          if (!isEditingStaging(this)) { this.renderStagingNpcs(); needsStagingRender = false; }
+        }
       });
     }
   }
 
-  // Live NPC Controls
+  clearDirtyFlags(container: HTMLElement) {
+    for (const input of Array.from(container.querySelectorAll("input"))) {
+      delete (input as HTMLInputElement).dataset.dirty;
+    }
+  }
+
+  // Live NPC Controls (owner only, after start)
   renderNpcLiveControls() {
-    if (!lastSnapshot || !myId) { this.npcLiveList.innerHTML = "No NPCs"; return; }
+    if (!lastSnapshot || !myId) {
+      if (this.npcLiveList) this.npcLiveList.innerHTML = "";
+      return;
+    }
     const isOwner = lastSnapshot.session.ownerId === myId;
+
     if (!isOwner) { this.npcLiveList.innerHTML = "No access"; return; }
+    if (!lastSnapshot.session.started) { this.npcLiveList.innerHTML = '<span class="muted">Staging… (no NPCs yet)</span>'; return; }
 
     const npcs = lastSnapshot.players.filter(p => p.role === "npc");
-    if (!lastSnapshot.session.started) { this.npcLiveList.innerHTML = '<span class="muted">Staging… (no NPCs yet)</span>'; return; }
     if (npcs.length === 0) { this.npcLiveList.innerHTML = '<span class="muted">No NPCs</span>'; return; }
 
     const rows = npcs.map(p => `
       <tr data-id="${p.id}">
-        <td>${p.callsign}</td>
+        <td style="text-align:left">${p.callsign}</td>
         <td><input class="ln_c tiny" value="${p.courseDeg.toFixed(0)}"/></td>
         <td><input class="ln_s tiny" value="${p.speedKts.toFixed(0)}"/></td>
         <td><button class="ln_set">Set</button></td>
@@ -478,13 +652,16 @@ class RadarScene extends Phaser.Scene {
     `;
 
     for (const tr of Array.from(this.npcLiveList.querySelectorAll("tr[data-id]"))) {
-      const npcId = (tr as HTMLElement).getAttribute("data-id")!;
-      const btn = tr.querySelector(".ln_set") as HTMLButtonElement;
+      const host = tr as HTMLElement;
+      const npcId = host.getAttribute("data-id")!;
+      const btn = host.querySelector(".ln_set") as HTMLButtonElement;
+      const ic = host.querySelector<HTMLInputElement>(".ln_c")!;
+      const is = host.querySelector<HTMLInputElement>(".ln_s")!;
       btn.addEventListener("click", () => {
         if (!socket || !lastSnapshot) return;
         const sid = lastSnapshot.session.id;
-        const c = Number((tr.querySelector<HTMLInputElement>(".ln_c"))?.value ?? 0);
-        const s = Number((tr.querySelector<HTMLInputElement>(".ln_s"))?.value ?? 0);
+        const c = Number(ic.value);
+        const s = Number(is.value);
         socket.emit("npc:setNav", { sessionId: sid, npcId, courseDeg: c, speedKts: s }, (resp: any) => {
           if (!resp?.ok) alert(`NPC set failed: ${String(resp?.error ?? "")}`);
         });
@@ -492,7 +669,7 @@ class RadarScene extends Phaser.Scene {
     }
   }
 
-  // === Radar draw ===
+  // === Radar ===
   resize() {
     const { width, height } = this.scale;
     this.cx = width / 2; this.cy = height / 2; this.r = Math.min(width, height) * 0.45;
@@ -579,7 +756,6 @@ class RadarScene extends Phaser.Scene {
     this.drawContacts();
   }
 
-  // Contacts panel
   renderContactsPanel() {
     if (!lastSnapshot) return;
     const me = lastSnapshot.players.find(p => p.id === myId);
@@ -608,14 +784,10 @@ class RadarScene extends Phaser.Scene {
   }
 }
 
-// helpers
-function pad3(n:number){ return String(Math.round(n)%360).padStart(3,"0"); }
-function cryptoRand(){ return Math.random().toString(36).slice(2,9); }
-
 new Phaser.Game({
   type: Phaser.AUTO,
   parent: "app",
-  backgroundColor: "#020702",
+  backgroundColor: "#0a2a16",
   scale: { mode: Phaser.Scale.RESIZE, autoCenter: Phaser.Scale.CENTER_BOTH, width: 960, height: 640 },
   scene: [RadarScene],
 });

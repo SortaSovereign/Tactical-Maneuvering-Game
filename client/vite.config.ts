@@ -1,7 +1,7 @@
-import { defineConfig } from "vite";
+import { defineConfig } from 'vite';
+
 export default defineConfig({
-  server: {
-    host: true,
-    port: 5173
-  }
+  base: './', // critical for itch.io & static hosting
+  server: { port: 5173, host: true },
+  build: { outDir: 'dist' }
 });
