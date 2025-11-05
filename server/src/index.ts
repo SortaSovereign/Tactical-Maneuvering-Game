@@ -118,6 +118,11 @@ app.use(/.*/, cors({
 }));
 
 const httpServer = http.createServer(app);
+const PORT = Number(process.env.PORT || 3001);
+httpServer.listen(PORT, "0.0.0.0", () => {
+  console.log(">>> Building from", __filename);
+  console.log(`Radar server listening on ${PORT}`);
+});
 
 const io = new Server(httpServer, {
   path: "/socket.io",
@@ -386,7 +391,3 @@ setInterval(() => {
   }
 }, TICK_MS);
 
-const PORT = Number(process.env.PORT || 3001);
-httpServer.listen(PORT, "0.0.0.0", () => {
-  console.log(`Radar server listening on ${PORT}`);
-});
