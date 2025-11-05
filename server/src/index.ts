@@ -127,6 +127,7 @@ const io = new Server(httpServer, {
     credentials: false
   }
 });
+console.log("socket.io ready on /socket.io");
 
 // cors-allowlist.ts
 export const allowedOrigins = [
