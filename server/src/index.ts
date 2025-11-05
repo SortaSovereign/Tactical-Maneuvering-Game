@@ -108,8 +108,8 @@ function corsOrigin(origin: string | undefined, cb: (err: Error|null, ok?: boole
 }
 
 // Preflight and global CORS for Express routes
-app.options("*", cors());
-app.use(cors({
+app.options(/.*/, cors());
+app.use(/.*/, cors({
   origin: corsOrigin,
   methods: ["GET","POST","OPTIONS"],
   allowedHeaders: ["Content-Type","Authorization"],
