@@ -123,35 +123,35 @@ class RadarScene extends Phaser.Scene {
     const connectIfNeeded = () => {
       if (socket) return;
       (() => {
-        const raw = this.serverUrl.value.trim();
-        // Prefer explicit VITE_SERVER_URL in production
-        const PROD = typeof import.meta !== "undefined" && (import.meta as any).env?.PROD;
-        const envURL = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_SERVER_URL) as string | undefined;
-        const url = PROD ? (envURL || raw) : (envURL || raw);
+    const raw = this.serverUrl.value.trim();
+    const PROD = typeof import.meta !== "undefined" && (import.meta as any).env?.PROD;
+    const envURL = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_SERVER_URL) as string | undefined;
+    const url = PROD ? (envURL || raw) : (envURL || raw);
 
-        const path = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_SOCKET_PATH) || "/socket.io";
+  // This must match your server's Socket.IO config
+    const path = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_SOCKET_PATH) || "/socket.io";
 
-        console.log("[socket] target", url, "path", path, "prod?", PROD);
-        socket = io(url, {
-          path,
-          transports: ["websocket"], // itch/codespaces-friendly
-          withCredentials: false,
-          forceNew: true,
-          timeout: 15000
-        });
+    console.log("[socket] target", url, "path", path, "prod?", PROD);
 
-        socket.on("connect", () => {
-          console.log("[socket] connected", socket!.id);
-          setText(this.joinStatus, `Connected: ${socket!.id}`);
-          this.tryClaimOwner();
-        });
-        socket.on("connect_error", (err: any) => {
-          console.error("[socket] connect_error", err?.message || err);
-          setText(this.joinStatus, `Connect error: ${String(err?.message || err)}`);
-        });
-        socket.io.on("reconnect_attempt", (n: number) => console.warn("[socket] reconnect_attempt", n));
-        socket.on("disconnect", (r: any) => console.warn("[socket] disconnected:", r));
-      })()
+    socket = io(url, {
+      path,                     // << important: must be "/socket.io"
+       transports: ["websocket"], // << avoid polling on itch
+       withCredentials: false,
+       forceNew: true,
+       timeout: 15000
+      });
+
+  socket.on("connect", () => {
+    console.log("[socket] connected", socket!.id);
+    setText(this.joinStatus, `Connected: ${socket!.id}`);
+    this.tryClaimOwner();
+  });
+
+  socket.on("connect_error", (err: any) => {
+    console.error("[socket] connect_error", err?.message || err);
+    setText(this.joinStatus, `Connect error: ${String(err?.message || err)}`);
+  });
+})();
 
       socket.on("connect", () => {
         setText(this.joinStatus, `Connected: ${socket!.id}`);
