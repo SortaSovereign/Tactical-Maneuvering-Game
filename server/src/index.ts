@@ -97,6 +97,7 @@ const io = new Server(httpServer, {
       "https://*.itch.io", 
       "https://v6p9d9t4.ssl.hwcdn.net",
       "https://*.github.io",
+      "https://*.onrender.com"
       "https://yourdomain.com"          // add your final domain 
   ],
     methods: ["GET","POST"],
