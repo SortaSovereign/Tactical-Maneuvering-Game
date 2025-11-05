@@ -31,6 +31,17 @@ let lastSnapshot: SnapshotMsg | null = null;
 let myId: string | undefined = undefined;
 let pendingJoin = false;
 
+/** Snapshot accessor to satisfy TypeScript narrowings inside nested handlers.
+ * Throws if accessed before the first snapshot arrives (which our UI guards prevent).
+ */
+function SNAP(): SnapshotMsg {
+  if (!lastSnapshot) {
+    throw new Error("Snapshot not available yet");
+  }
+  return lastSnapshot;
+}
+
+
 const labelById = new Map<string, Phaser.GameObjects.Text>();
 
 // --- Persistent staging buffers (players & NPCs) ---
@@ -233,7 +244,7 @@ class RadarScene extends Phaser.Scene {
       const s = Number(this.speed.value);
       if (!lastSnapshot) return;
 
-      if (!lastSnapshot.session.started) {
+      if (!SNAP().session.started) {
         pendingNav = {
           courseDeg: isFinite(c) ? c : undefined,
           speedKts:  isFinite(s) ? s : undefined
@@ -253,16 +264,16 @@ class RadarScene extends Phaser.Scene {
     // Guide: range/pause
     this.guideRangeBtn.addEventListener("click", () => {
       if (!socket || !lastSnapshot) return;
-      const sid = lastSnapshot.session.id;
-      const nextRange = Number(this.guideRange.value) || lastSnapshot.session.rangeYds;
+      const sid = SNAP().session.id;
+      const nextRange = Number(this.guideRange.value) || SNAP().session.rangeYds;
       socket.emit("session:setRange", { sessionId: sid, rangeYds: nextRange }, (resp: any) => {
         if (!resp?.ok) setText(this.guideStatus, `Range set failed: ${String(resp?.error ?? "")}`);
       });
     });
     this.guidePauseBtn.addEventListener("click", () => {
       if (!socket || !lastSnapshot) return;
-      const sid = lastSnapshot.session.id;
-      const next = !lastSnapshot.session.paused;
+      const sid = SNAP().session.id;
+      const next = !SNAP().session.paused;
       socket.emit("session:pause", { sessionId: sid, paused: next }, (resp: any) => {
         if (!resp?.ok) setText(this.guideStatus, `Pause failed: ${String(resp?.error ?? "")}`);
       });
@@ -286,12 +297,12 @@ class RadarScene extends Phaser.Scene {
 
     this.startBtn.addEventListener("click", () => {
       if (!socket || !lastSnapshot) return;
-      const sid = lastSnapshot.session.id;
+      const sid = SNAP().session.id;
 
       // Build placements from buffered stagedPlayers (exclude owner)
       const placements: Array<{playerId:string; bearingDeg:number; distanceYds:number; courseDeg?:number; speedKts?:number}> = [];
-      const ownerId = lastSnapshot.session.ownerId;
-      for (const p of lastSnapshot.players) {
+      const ownerId = SNAP().session.ownerId;
+      for (const p of SNAP().players) {
         if (p.id === ownerId || p.role === "npc") continue;
         const st = stagedPlayers.get(p.id);
         if (!st) continue;
@@ -421,7 +432,7 @@ class RadarScene extends Phaser.Scene {
         // hide pre-join
         if (this.uiRoot) this.uiRoot.style.display = "none";
 
-        this.sessRange.value = String(lastSnapshot.session.rangeYds);
+        this.sessRange.value = String(SNAP().session.rangeYds);
         this.updateGuideUi();
         this.updateSessionBadge();
         this.updateWaitingOverlay();
@@ -433,7 +444,7 @@ class RadarScene extends Phaser.Scene {
         this.renderNpcLiveControls();
 
         // initialize started state tracking
-        prevStarted = lastSnapshot.session.started;
+        prevStarted = SNAP().session.started;
 
         this.drawContacts();
         this.renderContactsPanel();
@@ -456,15 +467,15 @@ class RadarScene extends Phaser.Scene {
   // === UI gating ===
   updateSessionBadge() {
     if (!lastSnapshot || !myId) { this.sessionBadge.style.display = "none"; return; }
-    const isOwner = lastSnapshot.session.ownerId === myId;
+    const isOwner = SNAP().session.ownerId === myId;
     this.sessionBadge.style.display = isOwner ? "block" : "none";
-    if (isOwner) this.badgeSessionId.textContent = lastSnapshot.session.id;
+    if (isOwner) this.badgeSessionId.textContent = SNAP().session.id;
   }
 
   updateGuideUi() {
     if (!lastSnapshot || !myId) return;
 
-    const isOwner = lastSnapshot.session.ownerId === myId;
+    const isOwner = SNAP().session.ownerId === myId;
     // show main card always after join
     show(this.mainCard, true, "block");
 
@@ -472,21 +483,21 @@ class RadarScene extends Phaser.Scene {
     show(this.guidePanel, isOwner);
 
     if (document.activeElement !== this.guideRange) {
-      this.guideRange.value = String(lastSnapshot.session.rangeYds);
+      this.guideRange.value = String(SNAP().session.rangeYds);
     }
-    setText(this.guideStatus, `${lastSnapshot.session.started ? "Armed" : "Staging"} • ${lastSnapshot.session.paused ? "Paused" : "Running"}`);
-    this.guidePauseBtn.textContent = lastSnapshot.session.paused ? "Resume" : "Pause";
+    setText(this.guideStatus, `${SNAP().session.started ? "Armed" : "Staging"} • ${SNAP().session.paused ? "Paused" : "Running"}`);
+    this.guidePauseBtn.textContent = SNAP().session.paused ? "Resume" : "Pause";
 
     // Staging card: owner before start; hide after start
-    show(this.stagingCard, isOwner && !lastSnapshot.session.started, "block");
+    show(this.stagingCard, isOwner && !SNAP().session.started, "block");
     // Live NPC block visible only after start (and owner)
-    show(this.npcLiveBlock, isOwner && lastSnapshot.session.started);
+    show(this.npcLiveBlock, isOwner && SNAP().session.started);
   }
 
   updateWaitingOverlay() {
     if (!lastSnapshot || !myId) { this.waitingOverlay.style.display = "none"; return; }
-    const isOwner = lastSnapshot.session.ownerId === myId;
-    const showIt = !lastSnapshot.session.started && !isOwner;
+    const isOwner = SNAP().session.ownerId === myId;
+    const showIt = !SNAP().session.started && !isOwner;
     this.waitingOverlay.style.display = showIt ? "flex" : "none";
   }
 
@@ -494,8 +505,8 @@ class RadarScene extends Phaser.Scene {
   seedStagedPlayersFromSnapshot(): boolean {
     if (!lastSnapshot) return false;
 
-    const ids = lastSnapshot.players
-      .filter(p => p.role !== "npc" && p.id !== lastSnapshot.session.ownerId)
+    const ids = SNAP().players
+      .filter(p => p.role !== "npc" && p.id !== SNAP().session.ownerId)
       .map(p => p.id)
       .sort();
     const key = ids.join(",");
@@ -504,8 +515,8 @@ class RadarScene extends Phaser.Scene {
     lastPlayerIdsKey = key;
 
     // Add new players
-    for (const p of lastSnapshot.players) {
-      if (p.role === "npc" || p.id === lastSnapshot.session.ownerId) continue;
+    for (const p of SNAP().players) {
+      if (p.role === "npc" || p.id === SNAP().session.ownerId) continue;
       if (!stagedPlayers.has(p.id)) {
         stagedPlayers.set(p.id, {
           bearingDeg: 0,
@@ -527,8 +538,8 @@ class RadarScene extends Phaser.Scene {
   renderStagingPlayers() {
     if (!lastSnapshot) { this.stagingPlayers.innerHTML = ""; return; }
 
-    const ownerId = lastSnapshot.session.ownerId;
-    const players = lastSnapshot.players.filter(p => p.role !== "npc" && p.id !== ownerId);
+    const ownerId = SNAP().session.ownerId;
+    const players = SNAP().players.filter(p => p.role !== "npc" && p.id !== ownerId);
 
     const rows = players.map(p => {
       const st = stagedPlayers.get(p.id)!;
@@ -627,12 +638,12 @@ class RadarScene extends Phaser.Scene {
       if (this.npcLiveList) this.npcLiveList.innerHTML = "";
       return;
     }
-    const isOwner = lastSnapshot.session.ownerId === myId;
+    const isOwner = SNAP().session.ownerId === myId;
 
     if (!isOwner) { this.npcLiveList.innerHTML = "No access"; return; }
-    if (!lastSnapshot.session.started) { this.npcLiveList.innerHTML = '<span class="muted">Staging… (no NPCs yet)</span>'; return; }
+    if (!SNAP().session.started) { this.npcLiveList.innerHTML = '<span class="muted">Staging… (no NPCs yet)</span>'; return; }
 
-    const npcs = lastSnapshot.players.filter(p => p.role === "npc");
+    const npcs = SNAP().players.filter(p => p.role === "npc");
     if (npcs.length === 0) { this.npcLiveList.innerHTML = '<span class="muted">No NPCs</span>'; return; }
 
     const rows = npcs.map(p => `
@@ -659,7 +670,7 @@ class RadarScene extends Phaser.Scene {
       const is = host.querySelector<HTMLInputElement>(".ln_s")!;
       btn.addEventListener("click", () => {
         if (!socket || !lastSnapshot) return;
-        const sid = lastSnapshot.session.id;
+        const sid = SNAP().session.id;
         const c = Number(ic.value);
         const s = Number(is.value);
         socket.emit("npc:setNav", { sessionId: sid, npcId, courseDeg: c, speedKts: s }, (resp: any) => {
@@ -698,10 +709,10 @@ class RadarScene extends Phaser.Scene {
     this.contactsG.clear();
     if (!lastSnapshot) return;
 
-    const me = lastSnapshot.players.find(p => p.id === myId);
+    const me = SNAP().players.find(p => p.id === myId);
     if (!me) return;
 
-    const rangeYds = lastSnapshot.session.rangeYds;
+    const rangeYds = SNAP().session.rangeYds;
     const { cx, cy, r } = this;
     const g = this.contactsG;
 
@@ -709,7 +720,7 @@ class RadarScene extends Phaser.Scene {
     g.lineStyle(2, 0x9df5a7, 1); g.strokeCircle(cx, cy, 6);
     this.upsertLabel("OWN", cx + 8, cy - 8, `${me.callsign} (OWN)`, false);
 
-    lastSnapshot.players.forEach(p => {
+    SNAP().players.forEach(p => {
       if (p.id === myId && p.role !== "npc") return;
       const rx = p.x - me.x, ry = p.y - me.y;
       let sx = cx + (rx / rangeYds) * r, sy = cy - (ry / rangeYds) * r;
@@ -758,10 +769,10 @@ class RadarScene extends Phaser.Scene {
 
   renderContactsPanel() {
     if (!lastSnapshot) return;
-    const me = lastSnapshot.players.find(p => p.id === myId);
+    const me = SNAP().players.find(p => p.id === myId);
     if (!me) { this.contactsDiv.innerHTML = `<div class="muted">Join a session to see contacts.</div>`; return; }
 
-    const rows = lastSnapshot.players
+    const rows = SNAP().players
       .filter(p => !(p.id === myId && p.role !== "npc"))
       .map(p => {
         const dYds = rangeY(me, p);
