@@ -1,5 +1,6 @@
 // ESM TypeScript server for Socket.IO radar sim
 import express from "express";
+import cors from "cors";
 import http from "http";
 import { Server } from "socket.io";
 
@@ -86,25 +87,59 @@ function emitSnapshot(io: Server, session: Session) {
 
 // --- server ---
 const app = express();
+
+// --- CORS configuration (itch.io, local dev, GitHub preview) ---
+const ALLOWED_ORIGINS = [
+  "https://itch.io",
+  "https://sortasovereign.itch.io", // <-- replace with your exact itch project origin if different
+  /^https:\/\/([a-z0-9-]+)\.itch\.io$/i,
+  /^https:\/\/.*\.githubpreview\.dev$/i,
+  "http://localhost:5173",
+  "http://127.0.0.1:5173"
+];
+
+function corsOrigin(origin: string | undefined, cb: (err: Error|null, ok?: boolean) => void) {
+  if (!origin) return cb(null, true);
+  for (const o of ALLOWED_ORIGINS) {
+    if (typeof o === "string" && o === origin) return cb(null, true);
+    if (o instanceof RegExp && o.test(origin)) return cb(null, true);
+  }
+  cb(new Error("Not allowed by CORS: " + origin));
+}
+
+// Preflight and global CORS for Express routes
+app.options("*", cors());
+app.use(cors({
+  origin: corsOrigin,
+  methods: ["GET","POST","OPTIONS"],
+  allowedHeaders: ["Content-Type","Authorization"],
+  credentials: false,
+  optionsSuccessStatus: 204
+}));
+
 const httpServer = http.createServer(app);
+
 const io = new Server(httpServer, {
-  cors: { origin: [
-      "http://localhost:5173", 
-      "http://127.0.0.1:5173",
-      "https://*.githubpreview.dev", 
-      "https://*.github.dev",
-      "https://itch.io", 
-      "https://*.itch.io", 
-      "https://v6p9d9t4.ssl.hwcdn.net",
-      "https://*.github.io",
-      "https://*.onrender.com",
-      "https://yourdomain.com"          // add your final domain 
-  ],
+  path: "/socket.io",
+  cors: {
+    origin: corsOrigin,
     methods: ["GET","POST"],
-    allowedHeaders: ["Content-Type"],
     credentials: false
- }
+  }
 });
+
+// cors-allowlist.ts
+export const allowedOrigins = [
+  "https://sortasovereign.itch.io",   // <-- replace with your exact itch origin
+  "https://itch.io",
+  "http://localhost:5173",
+  "http://127.0.0.1:5173",
+  // add your GH Pages origin if you test there:
+  // "https://yourusername.github.io"
+];
+
+export const itchRegex = /^https:\/\/([a-z0-9-]+)\.itch\.io$/i;
+
 
 app.get("/", (_req, res) => res.send("Radar server up"));
 
