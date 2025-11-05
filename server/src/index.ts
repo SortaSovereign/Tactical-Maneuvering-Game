@@ -88,7 +88,21 @@ function emitSnapshot(io: Server, session: Session) {
 const app = express();
 const httpServer = http.createServer(app);
 const io = new Server(httpServer, {
-  cors: { origin: "*", methods: ["GET","POST"] }
+  cors: { origin: [
+      "http://localhost:5173", 
+      "http://127.0.0.1:5173",
+      "https://*.githubpreview.dev", 
+      "https://*.github.dev",
+      "https://itch.io", 
+      "https://*.itch.io", 
+      "https://v6p9d9t4.ssl.hwcdn.net",
+      "https://*.github.io",
+      "https://yourdomain.com"          // add your final domain 
+  ],
+    methods: ["GET","POST"],
+    allowedHeaders: ["Content-Type"],
+    credentials: false
+ }
 });
 
 app.get("/", (_req, res) => res.send("Radar server up"));
@@ -336,7 +350,6 @@ setInterval(() => {
 }, TICK_MS);
 
 const PORT = Number(process.env.PORT || 3001);
-httpServer.listen(PORT, () => {
-  // eslint-disable-next-line no-console
+httpServer.listen(PORT, "0.0.0.0", () => {
   console.log(`Radar server listening on ${PORT}`);
 });
