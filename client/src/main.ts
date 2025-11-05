@@ -28,19 +28,15 @@ function cryptoRand(){ return Math.random().toString(36).slice(2,9); }
 
 let socket: Socket | null = null;
 let lastSnapshot: SnapshotMsg | null = null;
-let myId: string | undefined = undefined;
-let pendingJoin = false;
 
-/** Snapshot accessor to satisfy TypeScript narrowings inside nested handlers.
- * Throws if accessed before the first snapshot arrives (which our UI guards prevent).
- */
+/** Non-null snapshot accessor for nested callbacks. Throws if accessed too early. */
 function SNAP(): SnapshotMsg {
-  if (!lastSnapshot) {
-    throw new Error("Snapshot not available yet");
-  }
+  if (!lastSnapshot) throw new Error("Snapshot not available yet");
   return lastSnapshot;
 }
 
+let myId: string | undefined = undefined;
+let pendingJoin = false;
 
 const labelById = new Map<string, Phaser.GameObjects.Text>();
 
@@ -121,12 +117,41 @@ class RadarScene extends Phaser.Scene {
     // default server URL
     if (!this.serverUrl.value) {
       const envDefault = (import.meta as any).env?.VITE_DEFAULT_SERVER_URL as string | undefined;
-      this.serverUrl.value = envDefault || "https://tactical-maneuvering-game.onrender.com";
+      this.serverUrl.value = envDefault || "http://localhost:3001";
     }
 
     const connectIfNeeded = () => {
       if (socket) return;
-      socket = io(this.serverUrl.value.trim());
+      (() => {
+        const raw = this.serverUrl.value.trim();
+        // Prefer explicit VITE_SERVER_URL in production
+        const PROD = typeof import.meta !== "undefined" && (import.meta as any).env?.PROD;
+        const envURL = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_SERVER_URL) as string | undefined;
+        const url = PROD ? (envURL || raw) : (envURL || raw);
+
+        const path = (typeof import.meta !== "undefined" && (import.meta as any).env?.VITE_SOCKET_PATH) || "/socket.io";
+
+        console.log("[socket] target", url, "path", path, "prod?", PROD);
+        socket = io(url, {
+          path,
+          transports: ["websocket"], // itch/codespaces-friendly
+          withCredentials: false,
+          forceNew: true,
+          timeout: 15000
+        });
+
+        socket.on("connect", () => {
+          console.log("[socket] connected", socket!.id);
+          setText(this.joinStatus, `Connected: ${socket!.id}`);
+          this.tryClaimOwner();
+        });
+        socket.on("connect_error", (err: any) => {
+          console.error("[socket] connect_error", err?.message || err);
+          setText(this.joinStatus, `Connect error: ${String(err?.message || err)}`);
+        });
+        socket.io.on("reconnect_attempt", (n: number) => console.warn("[socket] reconnect_attempt", n));
+        socket.on("disconnect", (r: any) => console.warn("[socket] disconnected:", r));
+      })()
 
       socket.on("connect", () => {
         setText(this.joinStatus, `Connected: ${socket!.id}`);
