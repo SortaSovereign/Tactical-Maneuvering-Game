@@ -148,8 +148,11 @@ class RadarScene extends Phaser.Scene {
   });
 
   socket.on("connect_error", (err: any) => {
-    console.error("[socket] connect_error", err?.message || err);
-    setText(this.joinStatus, `Connect error: ${String(err?.message || err)}`);
+    console.error("[socket] connect_error", err);
+    const status = err?.code ?? err?.data?.status;
+    const detail = err?.message ?? String(err);
+    const suffix = status ? ` (${detail})` : "";
+    setText(this.joinStatus, `Connect error: ${status ?? detail}${suffix}`);
   });
 })();
 
@@ -158,7 +161,14 @@ class RadarScene extends Phaser.Scene {
         this.tryClaimOwner();
       });
       socket.on("disconnect", (reason) => setText(this.joinStatus, `Disconnected: ${String(reason)}`));
-      socket.on("connect_error", (err) => setText(this.joinStatus, `connect_error: ${("message" in (err as any)) ? (err as any).message : String(err)}`));
+      socket.on("connect_error", (err) => {
+        console.error("[socket] connect_error", err);
+        const anyErr = err as any;
+        const status = anyErr?.code ?? anyErr?.data?.status;
+        const detail = anyErr?.message ?? String(err);
+        const suffix = status ? ` (${detail})` : "";
+        setText(this.joinStatus, `connect_error: ${status ?? detail}${suffix}`);
+      });
 
       socket.on("state:snapshot", (snap: SnapshotMsg) => {
         if (this.lastServerTickMs) {
