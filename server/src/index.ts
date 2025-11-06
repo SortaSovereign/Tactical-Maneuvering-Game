@@ -93,6 +93,7 @@ const ALLOWED_ORIGINS = [
   "https://itch.io",
   "https://sortasovereign.itch.io", // <-- replace with your exact itch project origin if different
   /^https:\/\/([a-z0-9-]+)\.itch\.io$/i,
+  /^https:\/\/([a-z0-9-]+)\.itch\.zone$/i,
   /^https:\/\/([a-z0-9-]+)\.ssl\.hwcdn\.net$/i, // itch.io CDN assets (e.g. https://v6p9d9t4.ssl.hwcdn.net)
   /^https:\/\/.*\.githubpreview\.dev$/i,
   "http://localhost:5173",
@@ -147,6 +148,7 @@ console.log("socket.io ready on /socket.io");
 export const allowedOrigins = [
   "https://sortasovereign.itch.io",   // <-- replace with your exact itch origin
   "https://itch.io",
+  "https://html-classic.itch.zone",    // itch.io CDN (html-classic and similar subdomains)
   "https://v6p9d9t4.ssl.hwcdn.net",   // itch.io CDN (add additional *.ssl.hwcdn.net hosts as needed)
   "http://localhost:5173",
   "http://127.0.0.1:5173",
