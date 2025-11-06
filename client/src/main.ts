@@ -135,10 +135,10 @@ class RadarScene extends Phaser.Scene {
 
     socket = io(url, {
       path,                     // << important: must be "/socket.io"
-       transports: ["websocket"], // << avoid polling on itch
-       withCredentials: false,
-       forceNew: true,
-       timeout: 15000
+      transports: ["websocket", "polling"],
+      withCredentials: false,
+      forceNew: true,
+      timeout: 15000
       });
 
   socket.on("connect", () => {
