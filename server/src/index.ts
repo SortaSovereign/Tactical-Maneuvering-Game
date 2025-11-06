@@ -133,6 +133,14 @@ const io = new Server(httpServer, {
     credentials: false
   }
 });
+io.engine.on("connection_error", (err) => {
+  const status = err.context?.status;
+  console.error("socket.io connection_error", {
+    code: err.code,
+    message: err.message,
+    status,
+  });
+});
 console.log("socket.io ready on /socket.io");
 
 // cors-allowlist.ts
