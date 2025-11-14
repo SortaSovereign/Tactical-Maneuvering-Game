@@ -38,6 +38,10 @@ function SNAP(): SnapshotMsg {
 let myId: string | undefined = undefined;
 let pendingJoin = false;
 
+const hasWindow = typeof window !== "undefined";
+let cachedSessionId: string | null = hasWindow ? localStorage.getItem("rr_sessionId") : null;
+let cachedCallsign: string | null = hasWindow ? localStorage.getItem("rr_callsign") : null;
+
 const labelById = new Map<string, Phaser.GameObjects.Text>();
 
 // --- Persistent staging buffers (players & NPCs) ---
@@ -159,6 +163,17 @@ class RadarScene extends Phaser.Scene {
       socket.on("connect", () => {
         setText(this.joinStatus, `Connected: ${socket!.id}`);
         this.tryClaimOwner();
+
+        if (pendingJoin) return;
+
+        const storedSession = cachedSessionId ?? (hasWindow ? localStorage.getItem("rr_sessionId") : null);
+        const storedCallsign = cachedCallsign ?? (hasWindow ? localStorage.getItem("rr_callsign") : null);
+        const hasPriorIdentity = !!(myId && myId.length) || !!lastSnapshot;
+
+        if (storedSession && storedCallsign && hasPriorIdentity) {
+          setText(this.joinStatus, `Rejoining ${storedSession}…`);
+          this.joinSession(storedSession, storedCallsign, { auto: true });
+        }
       });
       socket.on("disconnect", (reason) => setText(this.joinStatus, `Disconnected: ${String(reason)}`));
       socket.on("connect_error", (err) => {
@@ -248,6 +263,8 @@ class RadarScene extends Phaser.Scene {
 
             localStorage.removeItem("rr_sessionId");
             localStorage.removeItem("rr_callsign");
+            cachedSessionId = null;
+            cachedCallsign = null;
 
             const csInput = (this.callsignInput.value || "GUIDE").trim() || "GUIDE";
             const cs = normalizeCallsign(csInput);
@@ -449,18 +466,22 @@ class RadarScene extends Phaser.Scene {
   }
 
   // Join
-  joinSession(sessionId: string, callsign: string) {
+  joinSession(sessionId: string, callsign: string, opts?: { auto?: boolean }) {
     if (!socket || pendingJoin) return;
     const cs = normalizeCallsign(callsign);
     const safeCs = cs || `SHIP-${Math.random().toString(36).slice(2,6).toUpperCase()}`;
+    const auto = !!opts?.auto;
 
     pendingJoin = true;
+    if (auto) setText(this.joinStatus, `Rejoining ${sessionId}…`);
     socket.emit("session:join", { sessionId, callsign: safeCs }, (resp: any) => {
       pendingJoin = false;
 
       if (resp?.ok) {
         lastSnapshot = resp.snapshot as SnapshotMsg;
-        myId = String(resp.myPlayerId || "")
+        myId = String(resp.myPlayerId || "");
+        cachedSessionId = sessionId;
+        cachedCallsign = safeCs;
         // bring up the dock/cards
         show(this.mainCard, true, "block");
 
@@ -484,17 +505,30 @@ class RadarScene extends Phaser.Scene {
         this.drawContacts();
         this.renderContactsPanel();
 
-        setText(this.joinStatus, `Joined ${sessionId} as ${safeCs}`);
+        if (pendingNav && SNAP().session.started && socket) {
+          socket.emit("player:setNav", pendingNav);
+          pendingNav = null;
+        }
+
+        const successPrefix = auto ? "Rejoined" : "Joined";
+        setText(this.joinStatus, `${successPrefix} ${sessionId} as ${safeCs}`);
         localStorage.setItem("rr_sessionId", sessionId);
         localStorage.setItem("rr_callsign", safeCs);
 
         this.tryClaimOwner();
       } else if (resp?.error === "CALLSIGN_TAKEN") {
-        const alt = `${safeCs}-${Math.random().toString(36).slice(2,4).toUpperCase()}`;
-        setText(this.joinStatus, `Callsign taken. Trying ${alt}…`);
-        this.joinSession(sessionId, alt);
+        myId = undefined;
+        if (auto) {
+          setText(this.joinStatus, `Auto-join failed: ${safeCs} in use. Enter a new callsign.`);
+        } else {
+          const alt = `${safeCs}-${Math.random().toString(36).slice(2,4).toUpperCase()}`;
+          setText(this.joinStatus, `Callsign taken. Trying ${alt}…`);
+          this.joinSession(sessionId, alt);
+        }
       } else {
-        setText(this.joinStatus, `Join failed: ${String(resp?.error ?? "")}`);
+        myId = undefined;
+        const prefix = auto ? "Auto-join failed" : "Join failed";
+        setText(this.joinStatus, `${prefix}: ${String(resp?.error ?? "")}`);
       }
     });
   }
