@@ -63,6 +63,12 @@ function isEditingStaging(scene: RadarScene) {
   return (a.tagName === "INPUT") && (inPlayers || inNpcs);
 }
 
+function isEditingNpcLive(scene: RadarScene) {
+  const a = document.activeElement as HTMLElement | null;
+  if (!a || a.tagName !== "INPUT") return false;
+  return !!scene.npcLiveList && scene.npcLiveList.contains(a);
+}
+
 // --- Prevent guide “jump”: queue My Nav during staging and flush on Start
 let prevStarted: boolean | null = null;
 let pendingNav: { courseDeg?: number; speedKts?: number } | null = null;
@@ -712,6 +718,10 @@ class RadarScene extends Phaser.Scene {
     if (!isOwner) { this.npcLiveList.innerHTML = "No access"; return; }
     if (!SNAP().session.started) { this.npcLiveList.innerHTML = '<span class="muted">Staging… (no NPCs yet)</span>'; return; }
 
+    if (isEditingNpcLive(this)) {
+      return;
+    }
+
     const npcs = SNAP().players.filter(p => p.role === "npc");
     if (npcs.length === 0) { this.npcLiveList.innerHTML = '<span class="muted">No NPCs</span>'; return; }
 
@@ -737,6 +747,10 @@ class RadarScene extends Phaser.Scene {
       const btn = host.querySelector(".ln_set") as HTMLButtonElement;
       const ic = host.querySelector<HTMLInputElement>(".ln_c")!;
       const is = host.querySelector<HTMLInputElement>(".ln_s")!;
+      const requestRefresh = () => setTimeout(() => this.renderNpcLiveControls(), 0);
+
+      ic.addEventListener("blur", requestRefresh);
+      is.addEventListener("blur", requestRefresh);
       btn.addEventListener("click", () => {
         if (!socket || !lastSnapshot) return;
         const sid = SNAP().session.id;
@@ -745,6 +759,7 @@ class RadarScene extends Phaser.Scene {
         socket.emit("npc:setNav", { sessionId: sid, npcId, courseDeg: c, speedKts: s }, (resp: any) => {
           if (!resp?.ok) alert(`NPC set failed: ${String(resp?.error ?? "")}`);
         });
+        requestRefresh();
       });
     }
   }
